@@ -1,0 +1,218 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import socket, sys, signal, getopt
+from scapy.all import ARP, Ether, srp1, get_if_addr, get_if_hwaddr
+
+mensaje_ayuda = "\nFormato correcto: (-h | --help)  |  [-c num | --count=num] (-d dev | --device=dev) destination IP"
+entrada = None      # el comando ingresado por el usuario.
+
+cant_mensajes = -1  # cantidad de mensajes a enviar, según [-c cant_mensajes] o [--count=cant_mensajes]. si es -1, no especifican -c.
+cant_enviados = 0   # cantidad de mensajes enviados.
+cant_recibidos = 0  # cantidad de mensajes recibidos.
+indice_entrada = 0  # dónde indexa cada control de entrada de parámetros.
+
+# muestra el mensaje de error y el de ayuda de sintaxis.
+def error(mensaje):
+    print(mensaje)
+    print(mensaje_ayuda)
+    exit(1)
+
+# retorna true si no hay nada en entrada desde la posición inicio hasta final.
+def vacio_desde(inicio,final):
+    global entrada
+    esta_vacio = True
+    i = inicio
+    while esta_vacio and i < final:
+        esta_vacio = entrada[i] == None
+        i += 1
+    return esta_vacio
+
+# rellena a entrada con vacíos a partir de la última hasta la sexta posición.
+def rellenar(length):
+    global entrada
+    i = 0
+    entrada_aux = [None,None,None,None,None]
+    while i < length:
+        entrada_aux[i] = entrada[i]
+        i += 1
+    i = length
+    entrada = entrada_aux
+
+def distinto_de_vacio(valor, mensaje):
+    if valor != None: return True
+    else: error(mensaje+" no especificada.")
+
+# retorna true si el usuario especifica help
+def especifica_help():
+    return entrada[0] == "-h" or entrada[0] == "--help"
+
+# retorna false si el usuario especifica count (no hubo error). 
+def especifica_count():
+    global cant_mensajes, indice_entrada
+    # especificó otra cosa que la interfaz. hay que analizar.
+    if entrada[0] == "-c":
+        if distinto_de_vacio(entrada[1],"Cantidad de mensajes") and entrada[1].isdigit():
+            cant_mensajes = int(entrada[1])
+            indice_entrada = 2
+        else:
+            error("Cantidad de mensajes especificada erróneamente.")
+    else:
+        # se divide el --count=num en --count y num
+        count_compuesta = entrada[0].split("=")
+        if count_compuesta[0] == "--count" and len(count_compuesta) != 2:
+            error("Parámetro --count mal ingresado. Se debe especificar como ""--count=num"", donde num es la cantidad de mensajes a enviar.")
+        else:
+            if count_compuesta[0] == "--count":
+                if count_compuesta[1].isdigit():
+                    # la cantidad de mensajes está especificada y es un número.
+                    cant_mensajes = int(count_compuesta[1])
+                    indice_entrada = 1
+                else:
+                    # o no se especificó la cantidad de mensajes o se especificó algo que no es un número.
+                    error("Cantidad de mensajes especificada erróneamente.")
+            else:
+                indice_entrada = 0
+
+def validar_interfaz(interfaz):
+    if interfaz == "": error("Interfaz no especificada.")
+    try:
+        mac_fuente = get_if_hwaddr(interfaz) 
+        ip_fuente = get_if_addr(interfaz)
+    except IOError:
+        error("La interfaz '"+interfaz+"' no existe.")
+    except KeyboardInterrupt:
+        exit(0)
+    return [mac_fuente, ip_fuente, interfaz]
+
+# retorna false si el usuario especifica device (no hubo error).
+def especifica_device():
+    global indice_entrada
+    interfaz = None
+    distinto_de_vacio(entrada[indice_entrada],"Interfaz")
+    if entrada[indice_entrada] == "-d":
+        distinto_de_vacio(entrada[indice_entrada+1],"Interfaz")
+        interfaz = entrada[indice_entrada+1]
+        indice_entrada += 2
+    else:
+        # se divide el --count=num en --count y num.
+        device_compuesta = entrada[indice_entrada].split("=")
+        if len(device_compuesta) != 2 or device_compuesta[0] != "--device":
+            if device_compuesta[0] == "--device":
+                error("Parámetro --device mal ingresado. Se debe especificar como ""--device=dev"", donde dev es la interfaz que se utilizará para mandar los mensajes.")
+            error("No se conoce la opción '"+entrada[indice_entrada]+"' ")
+        else:
+            if device_compuesta[1] == "": error("Interfaz no especificada.")
+            interfaz = device_compuesta[1]
+            # se especificó la interfaz.
+            indice_entrada += 1
+    return validar_interfaz(interfaz)
+
+# obtiene la dirección de IP especificada por el usuario. retorna si hubo error o no.
+def obtener_direccion_IP():
+    if not vacio_desde(indice_entrada+1,5): error("Opciones superfluas a partir de la dirección de IP.")
+    # la dirección IP se obtuvo correctamente. se pasa a validarla.
+    distinto_de_vacio(entrada[indice_entrada],"Dirección de IP")
+    direccion_IP = entrada[indice_entrada]
+    try:
+        socket.inet_pton(socket.AF_INET, direccion_IP)
+    except AttributeError:  # no inet_pton here, sorry
+        try:
+            socket.inet_aton(direccion_IP)
+        except socket.error:
+            error("Dirección de IP incorrecta. Formato válido: x.y.z.w, cada uno entre 0 y 255.")
+        if  direccion_IP.count('.') != 3 : error("Dirección de IP incorrecta. Formato válido: x.y.z.w, cada uno entre 0 y 255.")
+    except socket.error:  # not a valid address
+        error("Dirección de IP incorrecta. Formato válido: x.y.z.w, cada uno entre 0 y 255.")
+    return direccion_IP
+
+# muestra el mensaje de ayuda.
+def ayuda():
+    if not vacio_desde(1,5): error("Opciones superfluas a partir -h.")
+    print(mensaje_ayuda)
+
+# arma el paquete ARP según los parámetros.
+def armar_paquete_arp(mac_fuente, ip_fuente, ip_destino):
+    paquete_arp = ARP()
+    paquete_arp.hwtype = 0x1
+    paquete_arp.ptype = 0x800
+    paquete_arp.hwlen = 6
+    paquete_arp.plen = 4
+    paquete_arp.op = "who-has"
+    paquete_arp.hwsrc = mac_fuente
+    paquete_arp.psrc = ip_fuente
+    paquete_arp.hwdst = "00:00:00:00:00:00"
+    paquete_arp.pdst = ip_destino
+    return paquete_arp
+
+# arma la trama según los parámetros.
+def armar_trama(mac_fuente, paquete_arp):
+    trama = Ether()
+    trama.dst = "ff:ff:ff:ff:ff:ff"
+    trama.src = mac_fuente
+    trama.type = 0x806
+    trama.payload = paquete_arp
+    return trama
+
+# envía y recibe los paquetes ARP.
+def enviar_recibir_paquetes(mac_fuente, ip_fuente, interfaz, direccion_IP):
+    global cant_enviados, cant_recibidos
+    paquete_arp = armar_paquete_arp(mac_fuente,ip_fuente,direccion_IP)
+    trama = armar_trama(mac_fuente, paquete_arp)
+    incremento = 0
+    i = -2 
+    respuesta = None
+    mac_respuesta = None
+    ip_respuesta = None
+    timeout = 5
+    if cant_mensajes != -1:
+        # el usuario especificó una cantidad precisa de mensajes a enviar.
+        incremento = 1
+        i = 0
+    print(("Arping por "+trama.pdst+" a partir de "+interfaz+", con timeout de "+str(timeout)+" segundos, iniciado."))
+    try:
+        while i < cant_mensajes:
+            respuesta = srp1(trama,iface=interfaz, verbose = False, timeout = timeout)
+            cant_enviados += 1
+            if respuesta != None:
+                cant_recibidos += 1
+                mac_respuesta = respuesta.src
+                ip_respuesta = respuesta.payload.psrc
+                print(("Respuesta de "+ip_respuesta+" ("+mac_respuesta+")."))
+            else:
+                print(("No hubo respuesta de "+direccion_IP))
+            i += incremento
+        print(("\nSe enviaron "+str(cant_enviados)+". Respondieron "+str(cant_recibidos)+"."))
+    except socket.error:
+        print("\nDebe ejecutar el comando en modo administrador/root.")
+
+def salida_por_teclado(signum,frame):
+    signal.signal(signal.SIGINT,ori_sig)
+    print(("\nSe enviaron "+str(cant_enviados)+". Respondieron "+str(cant_recibidos)+"."))
+    exit(0)
+
+def main(argv): 
+    global entrada, length_entrada, cant_mensajes
+    # se toma el comando.
+    entrada = argv
+
+    length_entrada = len(entrada)
+
+    if length_entrada < 1:
+        error("Comando mal ingresado. Se deben especificar más parámetros.")
+    if length_entrada > 5: error("Comando mal ingresado. Se especificaron parámetros demás.")
+        
+    # para facilitar los controles de límite y especificaciones superfluas.
+    rellenar(length_entrada)
+
+    if especifica_help(): ayuda()
+    else:
+        especifica_count() 
+        info_interfaz = especifica_device() 
+        direccion_IP = obtener_direccion_IP()
+        enviar_recibir_paquetes(info_interfaz[0], info_interfaz[1], info_interfaz[2], direccion_IP)
+        
+if __name__ == "__main__":
+    ori_sig = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT,salida_por_teclado)
+    main(sys.argv[1:])

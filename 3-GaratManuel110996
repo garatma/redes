@@ -1,0 +1,175 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import socket, sys, signal, getopt, math
+from scapy.all import IP, UDP, DNS, DNSQR, sr1
+
+mensaje = "\nUso correcto: ""//dns trace//  ( -h | --help )  |  FQDN"
+dns = None
+numero_intentos = 0
+
+def error(mensaje_error):
+    print(mensaje_error+mensaje)
+    exit(1)
+
+def ayuda(args):
+    if len(args) != 0: error("Opciones superfluas especificadas.")
+    print(mensaje)
+    exit(0)
+
+def salida_por_teclado(signum,frame):
+    signal.signal(signal.SIGINT,ori_sig)
+    exit(0) 
+
+def test_fqdn(fqdn, tipo):
+    #print "test de "+fqdn+"\t"+tipo
+    global numero_intentos, dns
+    mensaje = str(fqdn)+" no es FQDN."
+    if fqdn != "." and len(fqdn) == 1: error(mensaje)
+    paquete = IP(dst=dns)/UDP(dport=53)/DNS(rd=1,qd=DNSQR(qname=fqdn, qtype=tipo))
+    try:
+        respuesta = sr1(paquete, verbose = False, timeout=5)
+        if respuesta == None: 
+            if numero_intentos == 0 and dns != "8.8.8.8":
+                print("El servidor "+dns+" no responde. Probando con los de google (8.8.8.8).")
+                numero_intentos = 1
+                dns = "8.8.8.8"
+                test_fqdn(fqdn, tipo)
+            else:
+                print("El servidor "+dns+" no responde. Ejecución finalizada.")
+                exit(1)
+        elif respuesta.an == None: 
+            print(mensaje)
+            exit(1)
+        return respuesta
+    except socket.error: 
+        print("\nDebe ejecutar el comando en modo administrador/root.")
+        exit(1)     
+
+# 1 = A
+# 2 = NS
+# 5 = CNAME
+# 6 = SOA  
+
+def mayor_longitud(lista, longitud):
+    i = 0
+    mayor = 0
+    while i < longitud:
+        candidato = len(lista[i].rdata)
+        if candidato > mayor: mayor = candidato
+        i += 1
+    return mayor
+
+def imprimir_tabs(elemento, mayor):
+    cantidad = mayor - len(elemento)
+    i = 1
+    espacios = " "
+    print(elemento, end=' ')
+    while i < cantidad + 3: 
+        espacios += " "
+        i += 1
+    print(espacios, end=' ')
+
+def consulta_iterativa(fqdn, clase):
+    respuesta = test_fqdn(fqdn, clase)
+    answer = respuesta.an
+    cant_respuestas = respuesta.ancount
+    i = 0
+    mayor = mayor_longitud(answer, cant_respuestas)
+    while i < cant_respuestas:
+        print('"'+fqdn+'"'+'\tIN\t'+clase+'\t', end=' ')
+        imprimir_tabs(answer[i].rdata, mayor)
+        print(test_fqdn(answer[i].rdata, "A").an.rdata)
+        test_fqdn(answer[i].rdata, "A")
+        i += 1
+
+def ultima_iteracion(fqdn):
+    respuesta = test_fqdn(fqdn, "A")
+    cant_respuestas = respuesta.ancount
+    i = 0
+    while ( i < cant_respuestas -1 ):
+        answer = respuesta.an
+        print('"'+fqdn+'"'+'\tIN\t'+"CNAME"+'\t'+answer[i].rdata)
+        i += 1
+    answer = respuesta.an
+    print('"'+fqdn+'"'+'\tIN\t'+"A"+'\t'+answer[i].rdata)
+
+def traza(fqdn):
+    subdominios = fqdn.split(".")
+    length = len(subdominios)
+    print('\nTraza de "'+fqdn+'" al servidor DNS '+dns+':\n')
+
+    # consulta de "."
+    consulta_iterativa(".","NS")
+    print("————————————————————————————————————————————————————————————————————————————————————")
+
+    i = length - 1
+    movil = []
+    # resto de la consulta
+    while 0 < i:
+        movil.insert(0,subdominios[i]+".")
+        consulta_iterativa(''.join(movil),"NS")
+        print("————————————————————————————————————————————————————————————————————————————————————")
+        i -= 1
+    movil.insert(0,subdominios[i]+".")
+    ultima_iteracion(fqdn)
+
+def obtener_servidor_dns():
+    global dns
+    mensaje = "Servidor DNS no encontrado en /etc/resolv.conf. Se van a utilizar los de Google."
+    try:
+        for line in open('/etc/resolv.conf', 'r'): 
+            columns = line.split()
+            if len(columns) > 1 and columns[0] == 'nameserver': dns = columns[1] 
+            
+    except IOError: 
+        print(mensaje)
+        dns = "8.8.8.8"
+    if dns == None: 
+        print(mensaje)
+        dns = "8.8.8.8"
+    else:
+        if dns.split(" ")[0] == "127.0.0.53":
+            seguir_intentando = True
+            print("El servidor DNS configurado en /etc/resolv.conf es 127.0.0.53 (systemd stub). Es posible que la traza no se pueda realizar con esta dirección. ¿Desea intentar con los servidores de Google? (default: s) [s/n]:", end=' ')
+            while seguir_intentando:
+                decision = input()
+                seguir_intentando = False
+                if decision == "s" or decision == "y" or decision == "S" or decision == "Y" or decision == "":
+                    dns = "8.8.8.8"
+                elif decision != "n" and decision != "N":
+                    print("Opción ingresada incorrecta. Pruebe nuevamente. [s/n] ", end=' ')
+                    seguir_intentando = True
+    print() 
+
+def main(argv):
+    try: opts, args = getopt.getopt(argv, "h", ["help"])
+    except getopt.GetoptError as err: error(err)
+
+
+    # evaluar si el usuario requiere ayuda
+    if len(opts) != 0 and opts[0][0] in ("-h", "--help"): ayuda(args)
+
+
+    # nada más debe haber un parámetro
+    length = len(argv)
+    if length > 1: error("Sólamente se debe especificar el FQDN.")
+    if length == 0: error("Se debe especificar el FQDN.")
+
+    obtener_servidor_dns()
+
+    # obtener el fqdn
+    fqdn = argv[0]
+
+    # probar si el fqdn es correcto
+    print("Test de FQDN para "+fqdn+":")
+    test_fqdn(fqdn, "A")
+    print(fqdn+" es FQDN.")
+
+    # realizar traza 
+    traza(fqdn)
+
+if __name__ == "__main__":
+    ori_sig = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT,salida_por_teclado)
+    main(sys.argv[1:])

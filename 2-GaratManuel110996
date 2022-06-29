@@ -1,0 +1,102 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import socket, sys, signal, getopt
+from scapy.all import TCP, IP, sr1
+
+mensaje = "\nUso correcto:\n""//syntest//  ( -h | --help )  |  [ -c cant | --count=cant ] ( -p puerto | --port=puerto ) IP"
+
+cant_enviados = 0
+cant_recibidos = 0
+
+def error(mensaje_error):
+    print(mensaje_error)
+    print(("Entrada incorrecta."+mensaje))
+    exit(1)
+
+def ayuda(args):
+    length = len(args)
+    if length != 0: error("Opciones superfluas especificadas.")
+    print(mensaje)
+    exit(0)
+
+def salida_por_teclado(signum,frame):
+    print(("\nCantidad enviados: "+str(cant_enviados)+". Cantidad recibidos: "+str(cant_recibidos)))
+    signal.signal(signal.SIGINT,ori_sig)
+    exit(0)
+
+
+##### ----------------considero como mensaje enviado a aquel que recibe respuesta o que termina por timeout excedido-------------------####
+def enviar_recibir_paquetes(direccion_ip, cant_mensajes, puerto):
+    global cant_enviados, cant_recibidos
+    ip = IP(dst = direccion_ip)/TCP(sport = 50000, dport = puerto, flags = "S" )
+    incremento = 0
+    i = -2
+    respuesta = None
+    puerto_respuesta = None
+    ip_respuesta = None
+    timeout = 2
+    if cant_mensajes != -1:
+        # el usuario especificó una cantidad precisa de mensajes a enviar.
+        incremento = 1
+        i = 0
+    print(("SYN test al puerto "+str(puerto)+" de "+direccion_ip+", con timeout de "+str(timeout)+" segundos, iniciado."))
+    try:
+        while i < cant_mensajes:
+            respuesta = sr1(ip, verbose = False, timeout = timeout)        
+            cant_enviados += 1
+            if respuesta != None:
+                cant_recibidos += 1
+                puerto_respuesta = respuesta.sport
+                ip_respuesta = respuesta.src
+                print(("Respuesta de "+ip_respuesta+", puerto: "+str(puerto_respuesta)+" con flags: "+respuesta.sprintf("%TCP.flags%")))
+            else:
+                print(("No hubo respuesta de "+direccion_ip))
+            i += incremento
+        print(("\nCantidad enviados: "+str(cant_enviados)+". Cantidad recibidos: "+str(cant_recibidos)))
+    except socket.error:
+        print("\nDebe ejecutar el comando en modo administrador/root.")
+
+def main(argv):
+    try: opts, args = getopt.getopt(argv,"hc:p:",["help","count=","port="])
+    except getopt.GetoptError as err: error(err)
+
+    cant_mensajes = -1 # se asume, por defecto, que no se va a especificar -c
+    puerto = 80
+    direccion_ip = None
+
+    # se extrae la información del comando: help/count/port.
+    for opt, arg in opts:
+        if opt in ("-h","--help"):
+            # el usuario especificó help.
+            ayuda(args)
+
+        elif opt in ("-c","--count"):
+            # el usuario especificó una cierta cantidad de mensajes.
+            if arg.isdigit():
+                cant_mensajes = int(arg)
+            else:
+                error("Cantidad de mensajes a enviar mal especificada.")
+
+        elif opt in ("-p","--port"):
+            if arg.isdigit(): puerto = int(arg) # el usuario especificó un puerto.
+            else: error("Puerto mal especificado.")
+
+    # se extrae la IP del comando y se la valida.
+
+    length = len(args)
+    if length == 1:
+        direccion_ip = args[0]
+        if  direccion_ip.count('.') != 3 : error("Dirección de IP incorrecta. Formato válido: x.y.z.w, cada uno entre 0 y 255.")
+        try: socket.inet_aton(direccion_ip)
+        except socket.error: error("Dirección de IP incorrecta. Formato válido: x.y.z.w, cada uno entre 0 y 255.")
+    elif length == 0: error("Direccion de IP no especificada.")
+    else: error("Opciones superfluas especificadas.")
+
+    # una vez aquí, se definieron la cantidad de mensajes, el puerto y una IP válida.
+    enviar_recibir_paquetes(direccion_ip, cant_mensajes, puerto)
+
+if __name__ == "__main__":
+    ori_sig = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT,salida_por_teclado)
+    main(sys.argv[1:])
